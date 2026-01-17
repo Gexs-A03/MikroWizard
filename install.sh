@@ -2,7 +2,6 @@
 
 set -e
 
-YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
 RD=$(echo "\033[01;31m")
 GN=$(echo "\033[1;92m")
@@ -35,7 +34,7 @@ fi
 # ------------------------------------------------------------
 
 msg_info "Updating container"
-apt update -y && apt upgrade -y
+apt update && apt upgrade -y
 msg_ok "System updated"
 
 msg_info "Installing dependencies"
@@ -52,35 +51,45 @@ cd "$APP_DIR"
 msg_ok "Directory ready"
 
 msg_info "Downloading Mikrowizard"
-wget -qO installer.sh \
-  https://gist.githubusercontent.com/s265925/84f8fdc90c8b330a1501626a50e983a1/raw/b1fc4e0f283fd48d78861fa1a665fd1cb19b734d/installer.sh
+INSTALLER_URL="https://gist.githubusercontent.com/s265925/84f8fdc90c8b330a1501626a50e983a1/raw/b1fc4e0f283fd48d78861fa1a665fd1cb19b734d/installer.sh"
+if ! wget -qO installer.sh --timeout=30 --tries=3 "$INSTALLER_URL"; then
+    msg_err "Failed to download installer from $INSTALLER_URL"
+    exit 1
+fi
+if [ ! -s installer.sh ] || [ $(stat -c%s installer.sh) -lt 200 ]; then
+    msg_err "Downloaded installer looks too small or empty"
+    exit 1
+fi
 msg_ok "Installer downloaded"
 
-msg_info "Patching installer for LXC"
-sed -i 's/docker.*//g' installer.sh
-sed -i 's/compose.*//g' installer.sh
-sed -i 's/systemctl.*//g' installer.sh
-sed -i 's/\/opt\/freidntl/'"$APP_DIR"'/g' installer.sh
+msg_info "Patching installer for LXC (safer edits)"
+# Remove lines mentioning docker, compose or systemctl (case-insensitive)
+sed -i '/docker/Id' installer.sh || true
+sed -i '/compose/Id' installer.sh || true
+sed -i '/systemctl/Id' installer.sh || true
+# Replace known hardcoded path with target app dir
+sed -i "s|/opt/freidntl|${APP_DIR}|g" installer.sh || true
 msg_ok "Installer patched"
 
 msg_info "Running installer"
-bash installer.sh
+bash installer.sh || { msg_err "Installer script failed"; exit 1; }
 msg_ok "Mikrowizard installed"
 
 # ------------------------------------------------------------
 # Systemd Service
 # ------------------------------------------------------------
 
-msg_info "Creating systemd service"
-
-cat <<EOF >/etc/systemd/system/${SERVICE}
+msg_info "Creating systemd service (if available)"
+if command -v systemctl >/dev/null 2>&1; then
+  if [ -f "${APP_DIR}/main.py" ]; then
+    cat <<EOF >/etc/systemd/system/${SERVICE}
 [Unit]
 Description=Mikrowizard Service
 After=network.target
 
 [Service]
 WorkingDirectory=${APP_DIR}
-ExecStart=/usr/bin/python3 ${APP_DIR}/main.py
+ExecStart=/usr/bin/env python3 ${APP_DIR}/main.py
 Restart=always
 User=root
 
@@ -88,11 +97,16 @@ User=root
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable ${SERVICE}
-systemctl start ${SERVICE}
-
-msg_ok "Service created and started"
+    systemctl daemon-reload
+    systemctl enable ${SERVICE}
+    systemctl start ${SERVICE}
+    msg_ok "Service created and started"
+  else
+    msg_info "No main.py found in ${APP_DIR}; skipping systemd unit creation"
+  fi
+else
+  msg_info "systemd not available in this container; skipping service creation"
+fi
 
 # ------------------------------------------------------------
 # Completion
